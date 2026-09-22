@@ -224,9 +224,15 @@ class CoreManagerService private constructor(): ICoreManager.Stub() {
     }
 
     override fun touch(event: MotionEvent) {
-        runBlocking(Dispatchers.IO) {
-//        runMain {
-            mAaVirtualDisplayAdapter?.onTouch(event)
+        // runBlocking is not covered by appCoroutineScope's exception handler: whatever
+        // escapes here goes back to the binder thread, and an unknown exception type
+        // is rethrown by Parcel.writeException and takes down system_server.
+        try {
+            runBlocking(Dispatchers.IO) {
+                mAaVirtualDisplayAdapter?.onTouch(event)
+            }
+        } catch (e: Throwable) {
+            log(TAG, "touch error", e)
         }
     }
 
@@ -294,8 +300,13 @@ class CoreManagerService private constructor(): ICoreManager.Stub() {
     }
 
     override fun getRecentTask(): RecentTask {
-        return runBlocking(Dispatchers.IO){
-            mAaVirtualDisplayAdapter?.getRecentTask() ?: RecentTask(emptyList(), emptyList())
+        return try {
+            runBlocking(Dispatchers.IO) {
+                mAaVirtualDisplayAdapter?.getRecentTask() ?: RecentTask(emptyList(), emptyList())
+            }
+        } catch (e: Throwable) {
+            log(TAG, "getRecentTask error", e)
+            RecentTask(emptyList(), emptyList())
         }
     }
 
