@@ -8,7 +8,6 @@ import android.os.Build
 import com.github.kyuubiran.ezxhelper.utils.*
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import io.github.nitsuya.aa.display.CoreApi
 import io.github.nitsuya.aa.display.IsSystemEnv
 import io.github.nitsuya.aa.display.xposed.BridgeService
 import io.github.nitsuya.aa.display.xposed.CoreManagerService
@@ -80,39 +79,6 @@ object AndroidHook : BaseHook() {
 
     }
 
-    object Power {
-        private val powerPress by lazy {
-            if(!IsSystemEnv) return@lazy null
-            try{
-                findMethod("com.android.server.policy.PhoneWindowManager") {
-                    name == "powerPress"
-                            && parameterCount == 3
-                            && parameterTypes[0] == Long::class.javaPrimitiveType //eventTime
-                            && parameterTypes[1] == Int::class.javaPrimitiveType //count
-                            && parameterTypes[2] == Boolean::class.javaPrimitiveType //beganFromNonInteractive
-                }
-            } catch (e: Throwable){
-                log(tagName,  "Power PhoneWindowManager.powerPress", e)
-                null
-            }
-        }
-        private var hookPower : XC_MethodHook.Unhook? = null
-        fun hook(){
-            unHook()
-            hookPower = powerPress?.hookBefore {
-                if (!(it.args[2] as Boolean)) {
-                    CoreApi.toggleDisplayPower()
-                    it.abortMethod()
-                } else {
-                    CoreApi.displayPower(true)
-                }
-            }
-        }
-        fun unHook(){
-            hookPower?.unhook()
-            hookPower = null
-        }
-    }
     object FuckAppUseApplicationContext {
         private val appInitUseDisplay: HashMap<String, Int> = hashMapOf()
         private val activityTaskManagerService_startProcessAsync by lazy {

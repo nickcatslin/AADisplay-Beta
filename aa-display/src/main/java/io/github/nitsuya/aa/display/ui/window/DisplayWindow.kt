@@ -8,6 +8,8 @@ import android.content.pm.ActivityInfo
 import android.graphics.PixelFormat
 import android.os.CountDownTimer
 import android.os.PowerManager
+import android.os.PowerManagerHidden
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.*
 import androidx.core.view.ViewCompat
@@ -27,6 +29,7 @@ import io.github.nitsuya.aa.display.xposed.hook.AndroidHook
 import io.github.nitsuya.aa.display.xposed.log
 import io.github.nitsuya.aa.display.xposed.util.Instances
 import io.github.nitsuya.aa.display.xposed.util.RomUtil
+import io.github.nitsuya.template.bases.appCoroutineScope
 import io.github.nitsuya.template.bases.runIO
 import io.github.nitsuya.template.bases.runMain
 import kotlinx.coroutines.*
@@ -61,7 +64,6 @@ class DisplayWindow(
     private var mAaDisconnectType = AA_DISCONNECT_DELAY_EXIT_TYPE
 
     private var mDisplayRatio = 1f
-    private var mDisplayPower = true
 
     private var mDestroyJob: Job? = null
     private var mChangeAlphaCountDownTimer = object : CountDownTimer(5000,5000){
@@ -73,7 +75,6 @@ class DisplayWindow(
         override fun onTick(millisUntilFinished: Long) {}
     }
 
-    private var mScreenOffReplaceLockScreen = AADisplayConfig.ScreenOffReplaceLockScreen.get(CoreManagerService.config)
     private val mDelayDestroyTime = AADisplayConfig.DelayDestroyTime.get(CoreManagerService.config).let { value ->
         if (value < 0) 0 else value
     }
@@ -111,10 +112,13 @@ class DisplayWindow(
                 }
             } catch (e : Throwable){}
         }
+        // The virtual display lives in its own display group (VIRTUAL_DISPLAY_FLAG_OWN_DISPLAY_GROUP).
+        // Holding a screen wake lock bound to that display keeps its power group awake while the
+        // phone's default display group sleeps normally (power key, timeout, ...). Without it the
+        // group would time out, DisplayManager would set the virtual display to STATE_OFF and
+        // WindowManager would hide every window on it, which shows up as a black stream on the car.
         fun init(){
-            if(mScreenOffReplaceLockScreen){
-                AndroidHook.Power.hook()
-            } else if(isSupportInteractive){
+            if(isSupportInteractive){
                 mContext.registerReceiver(this, addAction(IntentFilter()))
                 onReceive(mContext, if(Instances.powerManager.isInteractive) Intent.ACTION_SCREEN_ON else Intent.ACTION_SCREEN_OFF)
             } else {
@@ -125,9 +129,7 @@ class DisplayWindow(
             AndroidHook.FuckAppUseApplicationContext.hook()
         }
         fun release(){
-            if(mScreenOffReplaceLockScreen){
-                AndroidHook.Power.unHook()
-            } else if(isSupportInteractive){
+            if(isSupportInteractive){
                 mContext.unregisterReceiver(this)
                 onReceive(mContext, Intent.ACTION_SCREEN_ON)
             } else {
@@ -162,11 +164,11 @@ class DisplayWindow(
             root.allViews.forEach {
                 it.setOnTouchListener(this@DisplayWindow)
             }
-            if(mScreenOffReplaceLockScreen){
-                ibExtinguish.visibility = View.VISIBLE
-                ibExtinguish.setOnClickListener {
-                    toggleDisplayPower(false)
-                }
+            // Put the phone (default display group) to sleep from the floating controller.
+            // The virtual display keeps running thanks to the wake lock in interactiveMonitor.
+            ibExtinguish.visibility = View.VISIBLE
+            ibExtinguish.setOnClickListener {
+                toggleDisplayPower(false)
             }
             if(mDelayDestroyTime > 0){
                 ibDisconnectType.visibility = View.VISIBLE
@@ -307,8 +309,7 @@ class DisplayWindow(
              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
-                or (if(mScreenOffReplaceLockScreen) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0),
+                or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.START or Gravity.TOP
@@ -325,7 +326,6 @@ class DisplayWindow(
                 or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
-                or (if(mScreenOffReplaceLockScreen) WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON else 0)
                 or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
                 or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
             ,
@@ -364,19 +364,20 @@ class DisplayWindow(
             tvDestroyTime.visibility = View.GONE
             ibExitDisplay.visibility = View.GONE
             ibDisconnectType.visibility = View.VISIBLE
+            // Keep the icon in sync with the mode reset above, otherwise a "suspend" icon
+            // from before the disconnect would remain while the mode is already "delayed exit".
+            ibDisconnectType.setImageResource(R.drawable.ic_motion_photos_auto_24)
         }
         showController()
     }
 
     suspend fun onDestroyPromptly() {
         interactiveMonitor.release()
-        toggleDisplayPower(true)
         mDestroyJob?.cancelAndJoin()
         close()
     }
     suspend fun onDestroy(onDestroySucceed: () -> Unit) {
         interactiveMonitor.release()
-        toggleDisplayPower(true)
         mDestroyJob?.cancelAndJoin()
 
         if(mDelayDestroyTime == 0){
@@ -411,28 +412,39 @@ class DisplayWindow(
                         close()
                         onDestroySucceed()
                     }
-                }.launchIn(CoroutineScope(Dispatchers.Main))
+                }.launchIn(appCoroutineScope + Dispatchers.Main)
             }
         }
     }
 
-    fun toggleDisplayPower(displayPower: Boolean = !mDisplayPower){
+    /**
+     * Whether the phone's own screen is on. PowerManager.isInteractive() is global and stays
+     * true as long as any display group is awake (our virtual display always is), so the
+     * default display's state is checked directly.
+     */
+    private fun isDefaultDisplayOn(): Boolean {
+        val display = Instances.displayManager.getDisplay(Display.DEFAULT_DISPLAY) ?: return true
+        return when (display.state) {
+            Display.STATE_ON, Display.STATE_VR, Display.STATE_ON_SUSPEND -> true
+            else -> false // OFF, DOZE, DOZE_SUSPEND, UNKNOWN
+        }
+    }
+
+    /**
+     * Turns the phone screen on/off by putting only the default display group to sleep (or waking
+     * it) through PowerManager, exactly like the physical power key does. The virtual display is in
+     * its own display group and stays awake, so the mirrored app keeps rendering.
+     */
+    fun toggleDisplayPower(displayPower: Boolean = !isDefaultDisplayOn()){
         try {
-            if(mScreenOffReplaceLockScreen){
-                mDisplayPower = displayPower
-                if(mDisplayPower){
-                    SurfaceControlHidden.setDisplayPowerMode(SurfaceControlHidden.getInternalDisplayToken(), SurfaceControlHidden.POWER_MODE_NORMAL)
-                } else {
-                    SurfaceControlHidden.setDisplayPowerMode(SurfaceControlHidden.getInternalDisplayToken(), SurfaceControlHidden.POWER_MODE_OFF)
-                }
+            val now = SystemClock.uptimeMillis()
+            if(displayPower){
+                Instances.powerManagerHidden.wakeUp(now, PowerManagerHidden.WAKE_REASON_APPLICATION, "${BuildConfig.APPLICATION_ID}:wakeup")
             } else {
-                Instances.powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "${BuildConfig.APPLICATION_ID}:wakeup").apply {
-                    acquire()
-                    release()
-                }
+                Instances.powerManagerHidden.goToSleep(now, PowerManagerHidden.GO_TO_SLEEP_REASON_APPLICATION, 0)
             }
         } catch (e : Throwable){
-            log(TAG, "", e)
+            log(TAG, "toggleDisplayPower($displayPower) error", e)
         }
     }
 
