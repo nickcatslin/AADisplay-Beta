@@ -13,13 +13,12 @@ sealed class AADisplayConfig<T>(val key: String) {
 
     abstract fun get(config: SharedPreferences?): T
 
-    object LauncherPackage: StringConfig("LauncherPackage", "com.autonavi.amapauto")
-    object HomePackage: StringConfig("HomePackage", "com.ss.squarehome2")
+    object LauncherPackage: StringConfig("LauncherPackage", "com.google.android.apps.maps")
+    object HomePackage: StringConfig("HomePackage", "com.autolauncher.motorcar.free")
     object AutoOpen: BooleanConfig("AutoOpen", true)
     object VirtualDisplayDpi: IntConfig("VirtualDisplayDpi", 0)
     object AndroidAutoDpi: IntConfig("AndroidAutoDpi", 0)
     object DelayDestroyTime: IntConfig("DelayDestroyTime", 180)
-    object ScreenOffReplaceLockScreen: BooleanConfig("ScreenOffReplaceLockScreen", false)
     object CloseLauncherDashboard: BooleanConfig("CloseLauncherDashboard", true)
     object ForceRightAngle: BooleanConfig("ForceRightAngle", true)
     object DisplayImePolicy: IntConfig("DisplayImePolicy", 1) //WindowManager.DISPLAY_IME_POLICY_LOCAL:0, WindowManager.DISPLAY_IME_POLICY_FALLBACK_DISPLAY:1

@@ -2,8 +2,8 @@
     <string-array name="xposed_scope" >
         <item>android</item>
         <item>com.google.android.projection.gearhead</item>
-        <item>com.autonavi.amapauto</item>
-        <item>com.ss.squarehome2</item>
+        <item>com.google.android.apps.maps</item>
+        <item>com.autolauncher.motorcar.free</item>
     </string-array>
 
     <string-array name="ime_policy_keys">

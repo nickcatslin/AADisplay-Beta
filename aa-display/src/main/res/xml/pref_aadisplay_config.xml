@@ -17,20 +17,20 @@
         <EditTextPreference
             android:inputType="text"
             app:singleLineTitle="true"
-            app:defaultValue="com.autonavi.amapauto"
+            app:defaultValue="com.google.android.apps.maps"
             app:key="LauncherPackage"
             app:title="Default Launch Package"
-            app:summary="Package name of the app to launch when virtual display is created, can be empty"
+            app:summary="Package name of the app to launch when the virtual display is created. Empty = Google Maps (com.google.android.apps.maps)"
             app:useSimpleSummaryProvider="true"
             app:iconSpaceReserved="false"/>
 
         <EditTextPreference
             android:inputType="text"
             app:singleLineTitle="true"
-            app:defaultValue="com.ss.squarehome2"
+            app:defaultValue="com.autolauncher.motorcar.free"
             app:key="HomePackage"
             app:title="Home Package"
-            app:summary="Package name of the app to launch when Home key is pressed"
+            app:summary="Package name of the app to launch when the Home key is pressed. Empty = Car Launcher (com.autolauncher.motorcar.free)"
             app:useSimpleSummaryProvider="true"
             app:iconSpaceReserved="false"/>
 
@@ -55,13 +55,6 @@
             app:title="Keep Display Alive After Exit (seconds)"
             app:useSimpleSummaryProvider="true"
             app:iconSpaceReserved="false" />
-
-        <rikka.material.preference.MaterialSwitchPreference
-            app:defaultValue="false"
-            app:key="ScreenOffReplaceLockScreen"
-            app:title="Screen Off Only"
-            app:summary="Power key only turns off screen"
-            app:iconSpaceReserved="false"/>
 
         <rikka.material.preference.MaterialSwitchPreference
             app:defaultValue="true"
