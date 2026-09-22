@@ -58,7 +58,7 @@ android {
                 "proguard-rules.pro"
             )
             // 如果环境变量存在且签名配置有效，使用 release 签名，否则使用默认调试签名
-            if (System.getenv("KEY_ANDROID") != null) {
+            if (!System.getenv("KEY_ANDROID").isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("release")
             }
 //            proguardFiles(

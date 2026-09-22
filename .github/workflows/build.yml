@@ -13,9 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # key.jks password. When the secret is absent the release build is skipped
-      # and only the debug-signed APK is produced.
-      KEY_ANDROID: ${{ secrets.KEY_ANDROID }}
+      # key.jks password. GitHub exposes an unset secret as an empty string, so it is
+      # kept under a separate name and only exported as KEY_ANDROID when non-empty;
+      # build.gradle.kts switches to the release keystore whenever KEY_ANDROID exists.
+      SIGNING_KEY_PASSWORD: ${{ secrets.KEY_ANDROID }}
 
     steps:
       - name: Checkout
@@ -38,12 +39,16 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: Build debug APK
-        run: gradle --no-daemon --console=plain :aa-display:assembleDebug
-
-      - name: Build release APK
-        if: env.KEY_ANDROID != ''
-        run: gradle --no-daemon --console=plain :aa-display:assembleRelease
+      - name: Build APK
+        run: |
+          if [ -n "$SIGNING_KEY_PASSWORD" ]; then
+            echo "KEY_ANDROID secret present: building debug + release with key.jks"
+            export KEY_ANDROID="$SIGNING_KEY_PASSWORD"
+            gradle --no-daemon --console=plain :aa-display:assembleDebug :aa-display:assembleRelease
+          else
+            echo "KEY_ANDROID secret absent: building debug only (debug keystore)"
+            gradle --no-daemon --console=plain :aa-display:assembleDebug
+          fi
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -53,7 +58,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload release APK
-        if: env.KEY_ANDROID != ''
+        if: env.SIGNING_KEY_PASSWORD != ''
         uses: actions/upload-artifact@v4
         with:
           name: aa-display-release
