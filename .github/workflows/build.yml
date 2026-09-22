@@ -1,0 +1,61 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # key.jks password. When the secret is absent the release build is skipped
+      # and only the debug-signed APK is produced.
+      KEY_ANDROID: ${{ secrets.KEY_ANDROID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-36 platforms;android-33 build-tools;35.0.0
+
+      # The repo does not ship a Gradle wrapper jar; AGP 8.11 needs Gradle >= 8.13.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build debug APK
+        run: gradle --no-daemon --console=plain :aa-display:assembleDebug
+
+      - name: Build release APK
+        if: env.KEY_ANDROID != ''
+        run: gradle --no-daemon --console=plain :aa-display:assembleRelease
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aa-display-debug
+          path: aa-display/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK
+        if: env.KEY_ANDROID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: aa-display-release
+          path: aa-display/build/outputs/apk/release/*.apk
+          if-no-files-found: error
