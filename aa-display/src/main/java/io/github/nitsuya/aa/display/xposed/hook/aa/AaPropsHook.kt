@@ -89,13 +89,22 @@ object AaPropsHook: AaHook() {
     }
 
     override fun hook(config: SharedPreferences, lpparam: XC_LoadPackage.LoadPackageParam) {
-        hookComGoogleAndroidProjectionGearheadProps(config, lpparam)
-        hookComGoogleAndroidGmsCarProps(config, lpparam)
+        // The two injections are independent: the gearhead one needs the DexKit-resolved
+        // flag getter, the gms.car one only hooks ContentResolver. Isolate them so a failure
+        // in one (e.g. DexKit missing the flag class after an AA update) never disables the other.
+        runCatching { hookComGoogleAndroidProjectionGearheadProps(config, lpparam) }
+            .onFailure { e -> log(tagName, "[com.google.android.projection.gearhead] config hook failed", e) }
+        runCatching { hookComGoogleAndroidGmsCarProps(config, lpparam) }
+            .onFailure { e -> log(tagName, "[com.google.android.gms.car] config hook failed", e) }
     }
 
     private fun hookComGoogleAndroidProjectionGearheadProps(config: SharedPreferences?, lpparam: XC_LoadPackage.LoadPackageParam) {
         val props = AADisplayConfig.ComGoogleAndroidProjectionGearheadProps.get(config) ?: return
         if (props.isEmpty) {
+            return
+        }
+        if (!::method.isInitialized || !::groupField.isInitialized || !::keyField.isInitialized) {
+            log(tagName, "[com.google.android.projection.gearhead] config skipped: flag class not resolved by loadDexClass")
             return
         }
         val keyValue = HashMap<String, Any?>(props.size, 1f)
@@ -155,9 +164,13 @@ object AaPropsHook: AaHook() {
             return
         }
         try {
-            val matrixCursor = MatrixCursor(arrayOf("key", "value"), props.size).apply {
-                props.forEach { prop ->
-                    addRow(arrayOf(prop.key, prop.value))
+            // Snapshot the rows once; build a fresh MatrixCursor per query. A Cursor carries
+            // position state and gets closed together with the MergeCursor that wraps it, so a
+            // single shared instance breaks under concurrent queries and after the first close.
+            val rows: List<Array<Any?>> = props.entries.map { prop -> arrayOf<Any?>(prop.key, prop.value) }
+            val newPropsCursor: () -> Cursor = {
+                MatrixCursor(arrayOf("key", "value"), rows.size).apply {
+                    rows.forEach { row -> addRow(row) }
                 }
             }
             findMethod(ContentResolver::class.java) {
@@ -174,10 +187,11 @@ object AaPropsHook: AaHook() {
                 //log(tagName, "ContentProvider.query: uri: $uri")
                 if (uri.path != "/com.google.android.gms.car") return@hookAfter
                 //log(AaUiHook.tagName, "GmsCarProps-----${lpparam.processName}------")
-                param.result = if (param.result == null) matrixCursor else MergeCursor(
+                val propsCursor = newPropsCursor()
+                param.result = if (param.result == null) propsCursor else MergeCursor(
                     arrayOf(
                         param.result as Cursor,
-                        matrixCursor
+                        propsCursor
                     )
                 )
             }
