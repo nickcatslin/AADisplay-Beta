@@ -13,10 +13,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # key.jks password. GitHub exposes an unset secret as an empty string, so it is
-      # kept under a separate name and only exported as KEY_ANDROID when non-empty;
-      # build.gradle.kts switches to the release keystore whenever KEY_ANDROID exists.
+      # Release signing secrets. GitHub exposes a missing secret as an empty string,
+      # so they are kept under their own names and only applied when non-empty.
+      #   KEY_ANDROID             password of the release keystore (alias key0)
+      #   RELEASE_KEYSTORE_BASE64 optional: base64 of your own .jks; when set it
+      #                           replaces the key.jks committed in the repo
       SIGNING_KEY_PASSWORD: ${{ secrets.KEY_ANDROID }}
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
 
     steps:
       - name: Checkout
@@ -39,16 +42,11 @@ jobs:
         with:
           gradle-version: "8.13"
 
-      - name: Build APK
-        run: |
-          if [ -n "$SIGNING_KEY_PASSWORD" ]; then
-            echo "KEY_ANDROID secret present: building debug + release with key.jks"
-            export KEY_ANDROID="$SIGNING_KEY_PASSWORD"
-            gradle --no-daemon --console=plain :aa-display:assembleDebug :aa-display:assembleRelease
-          else
-            echo "KEY_ANDROID secret absent: building debug only (debug keystore)"
-            gradle --no-daemon --console=plain :aa-display:assembleDebug
-          fi
+      # KEY_ANDROID is deliberately NOT exported here: build.gradle.kts would switch
+      # the debug variant to the release keystore, and a wrong password would then
+      # break the debug build too.
+      - name: Build debug APK
+        run: gradle --no-daemon --console=plain :aa-display:assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -56,6 +54,28 @@ jobs:
           name: aa-display-debug
           path: aa-display/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Install release keystore from secret
+        if: env.RELEASE_KEYSTORE_BASE64 != ''
+        run: |
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > key.jks
+          echo "key.jks replaced from RELEASE_KEYSTORE_BASE64 ($(stat -c %s key.jks) bytes)"
+
+      - name: Verify release keystore password
+        if: env.SIGNING_KEY_PASSWORD != ''
+        run: |
+          if keytool -list -keystore key.jks -storepass "$SIGNING_KEY_PASSWORD" -alias key0 > /dev/null 2>&1; then
+            echo "keystore OK: alias key0 found"
+          else
+            echo "::error::KEY_ANDROID does not open key.jks (or alias key0 is missing). Set RELEASE_KEYSTORE_BASE64 to your own keystore or fix the password."
+            exit 1
+          fi
+
+      - name: Build release APK
+        if: env.SIGNING_KEY_PASSWORD != ''
+        env:
+          KEY_ANDROID: ${{ secrets.KEY_ANDROID }}
+        run: gradle --no-daemon --console=plain :aa-display:assembleRelease
 
       - name: Upload release APK
         if: env.SIGNING_KEY_PASSWORD != ''
