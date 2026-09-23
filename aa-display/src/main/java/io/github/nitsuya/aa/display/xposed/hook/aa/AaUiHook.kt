@@ -46,6 +46,15 @@ object AaUiHook: AaHook() {
     private var layoutInfoConstructor: Constructor<*>? = null
     private var startMethod: Method? = null
 
+    // Auto Open 每次投影連線只觸發一次。操作欄是 Fragment 的固定 layout，日夜主題切換、
+    // 直排欄/底欄切換等都會重新 inflate，若每次都觸發會把使用者從其他 AA app 拉回 AADisplay。
+    // 以 CarSystemUiControllerService 的生命週期當作「一次連線」：onCreate 時重設旗標。
+    // 若該 onCreate hook 掛不上，就停用這層保護，退回原本每次 inflate 都觸發的行為，
+    // 避免 :projection 行程跨連線存活時第二次連線永遠不自動開啟。
+    private var sysUiServiceClass: Class<*>? = null
+    @Volatile private var autoOpenGuardEnabled = false
+    @Volatile private var autoOpenedThisSession = false
+
     private var resLayoutLeftResourceId: Int = 0
     private var resLayoutRightResourceId: Int = 0
 
@@ -140,7 +149,8 @@ object AaUiHook: AaHook() {
         }.getOrNull()
 
         try{
-            startMethod = loadClass("com.google.android.projection.gearhead.service.CarSystemUiControllerService").staticMethod("a", null, argTypes(Intent::class.java))
+            sysUiServiceClass = loadClass("com.google.android.projection.gearhead.service.CarSystemUiControllerService")
+            startMethod = sysUiServiceClass!!.staticMethod("a", null, argTypes(Intent::class.java))
         } catch (e: Throwable){
             log(tagName,  "AaUiHook: not found CarSystemUiControllerService.a static method", e)
         }
@@ -190,8 +200,26 @@ object AaUiHook: AaHook() {
         log(tagName,  "AaUiHook: ~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         hookBaseClick()
         hookLayout()
+        hookAutoOpenSession()
         hookFacetBar(config)
         hookRadius(config)
+    }
+
+    private fun hookAutoOpenSession() {
+        val clazz = sysUiServiceClass
+        if (clazz == null) {
+            log(tagName, "AaUiHook: CarSystemUiControllerService unresolved, auto-open once-per-session guard disabled")
+            return
+        }
+        try {
+            findMethod(clazz) { name == "onCreate" && parameterCount == 0 }.hookAfter {
+                autoOpenedThisSession = false
+                log(tagName, "AaUiHook: CarSystemUiControllerService.onCreate -> new projection session, auto-open re-armed")
+            }
+            autoOpenGuardEnabled = true
+        } catch (e: Throwable) {
+            log(tagName, "AaUiHook: CarSystemUiControllerService.onCreate not hookable, auto-open once-per-session guard disabled", e)
+        }
     }
 
     private fun printBundle(extras: Bundle, index: Int): String{
@@ -449,16 +477,22 @@ object AaUiHook: AaHook() {
             // 图标按 ConstraintSet 在窄 slot 内正常排布（与升级前 16.1 一致）。R4 曾用主屏
             // 密度算的 px 强设宽度，与投屏 display 密度不符，把图标布局撑坏，已移除。
             if(autoOpen){
-                aaFacetBar.post {
-                    runMain {
-                        delay(1000)
-                        try{
-                            startMethod?.invoke(null, Intent().apply {
-                                component = ComponentName(BuildConfig.APPLICATION_ID, AaActivityService::class.java.name)
-                                putExtra("android.intent.extra.PACKAGE_NAME", BuildConfig.APPLICATION_ID)
-                            })
-                        } catch (e: Throwable) {
-                            log(tagName, "CarSystemUiControllerService.a start app error", e)
+                if (autoOpenGuardEnabled && autoOpenedThisSession) {
+                    log(tagName, "AaUiHook: facet bar re-inflated, auto-open already done this session, skip")
+                } else {
+                    // 在排程當下就標記，避免短時間內連續 inflate 排出多個延遲啟動。
+                    autoOpenedThisSession = true
+                    aaFacetBar.post {
+                        runMain {
+                            delay(1000)
+                            try{
+                                startMethod?.invoke(null, Intent().apply {
+                                    component = ComponentName(BuildConfig.APPLICATION_ID, AaActivityService::class.java.name)
+                                    putExtra("android.intent.extra.PACKAGE_NAME", BuildConfig.APPLICATION_ID)
+                                })
+                            } catch (e: Throwable) {
+                                log(tagName, "CarSystemUiControllerService.a start app error", e)
+                            }
                         }
                     }
                 }
