@@ -14,8 +14,8 @@ android {
         applicationId = "io.github.nitsuya.aa.display"
         minSdk = 31
         targetSdk = 36
-        versionCode = 3004  // 设置一个很大的版本号，避免 LSPosed 提示更新
-        versionName = "0.26#16.7+beta"
+        versionCode = 3005  // 设置一个很大的版本号，避免 LSPosed 提示更新
+        versionName = "0.27#17.6+beta"
         buildConfigField("long", "BUILD_TIME", buildTime.toString())
     }
 
