@@ -197,7 +197,7 @@ object AaDpiHook: AaHook() {
         return fallback
     }
 
-    override fun hook(config: SharedPreferences, lpparam: XC_LoadPackage.LoadPackageParam) {
+    override fun hook(config: SharedPreferences?, lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val androidAutoDpi = AADisplayConfig.AndroidAutoDpi.get(config)
             if (androidAutoDpi < 50) return

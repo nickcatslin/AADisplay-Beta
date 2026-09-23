@@ -30,9 +30,11 @@ sealed class AADisplayConfig<T>(val key: String) {
 
 
     abstract class StringConfig(key: String, private val defValue: String? = null): AADisplayConfig<String?>(key){
-        override fun get(config: SharedPreferences?): String? = config?.getString(key, defValue)?.trim()?.let {
-            it.ifBlank { defValue }
-        } ?: null
+        // A missing config (file not created yet / unreadable) must behave like an empty
+        // one: fall back to defValue, never to null. Otherwise a fresh install has no
+        // launcher / home package at all.
+        override fun get(config: SharedPreferences?): String? =
+            config?.getString(key, defValue)?.trim()?.ifBlank { defValue } ?: defValue
     }
     abstract class BooleanConfig(key: String, private val defValue: Boolean = false): AADisplayConfig<Boolean>(key){
         override fun get(config: SharedPreferences?): Boolean = config?.getBoolean(key, defValue) ?: defValue

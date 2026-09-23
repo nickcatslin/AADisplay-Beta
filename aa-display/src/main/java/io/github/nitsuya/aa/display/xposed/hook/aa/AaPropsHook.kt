@@ -88,7 +88,7 @@ object AaPropsHook: AaHook() {
         }
     }
 
-    override fun hook(config: SharedPreferences, lpparam: XC_LoadPackage.LoadPackageParam) {
+    override fun hook(config: SharedPreferences?, lpparam: XC_LoadPackage.LoadPackageParam) {
         // The two injections are independent: the gearhead one needs the DexKit-resolved
         // flag getter, the gms.car one only hooks ContentResolver. Isolate them so a failure
         // in one (e.g. DexKit missing the flag class after an AA update) never disables the other.

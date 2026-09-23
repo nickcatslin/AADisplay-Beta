@@ -31,7 +31,7 @@ abstract class AaHook {
     abstract val tagName: String
     abstract fun isSupportProcess(processName: String) : Boolean
     open fun loadDexClass(bridge: DexKitBridge, lpparam: XC_LoadPackage.LoadPackageParam) {}
-    abstract fun hook(config: SharedPreferences, lpparam: XC_LoadPackage.LoadPackageParam)
+    abstract fun hook(config: SharedPreferences?, lpparam: XC_LoadPackage.LoadPackageParam)
 }
 
 object AndroidAuoHook : BaseHook() {
@@ -41,10 +41,12 @@ object AndroidAuoHook : BaseHook() {
         val hooks = listOf(AaBasicsHook, AaSignatureHook, AaDpiHook, AaBtnEventHook, AaUiHook, AaPropsHook).filter { i -> i.isSupportProcess(processName) }
         if(hooks.isEmpty()) return
 
-        val configPreferences = XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName)
-        if(!configPreferences.file.canRead()){
-            log(tagName,"load configPreferences fail")
-            return
+        // The config file only exists once the module app has run at least once. Do not
+        // give up when it is missing: every AADisplayConfig getter falls back to its default
+        // for a null config, and the signature / UI hooks are needed regardless of settings.
+        val configPreferences: SharedPreferences? = XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName).takeIf { it.file.canRead() }
+        if (configPreferences == null) {
+            log(tagName, "config file not readable (module app never run?), using defaults")
         }
 
         var onCreateApplication: XC_MethodHook.Unhook? = null

@@ -38,14 +38,17 @@ class CoreManagerService private constructor(): ICoreManager.Stub() {
                 systemContextHost = value.createContext(value.params ?: ContextParams.Builder().build())
             }
 
-        val config: XSharedPreferences? by lazy {
-            XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName).let { config ->
-                if(!config.file.canRead())
-                    null
-                else
-                    config
-            }
+        private val xConfig: XSharedPreferences by lazy {
+            XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName)
         }
+
+        /**
+         * null while the module app has not yet created its config file. Re-evaluated on
+         * every access (not cached), so the settings become visible as soon as the file
+         * appears, without a reboot. All AADisplayConfig getters treat null as "defaults".
+         */
+        val config: XSharedPreferences?
+            get() = xConfig.takeIf { it.file.canRead() }
 
         private var mDisplayWindow: DisplayWindow? = null
         private var mAaVirtualDisplayAdapter: AaVirtualDisplayAdapter? = null

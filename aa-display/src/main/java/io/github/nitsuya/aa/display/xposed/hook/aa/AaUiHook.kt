@@ -186,7 +186,7 @@ object AaUiHook: AaHook() {
 
     }
 
-    override fun hook(config: SharedPreferences, lpparam: XC_LoadPackage.LoadPackageParam) {
+    override fun hook(config: SharedPreferences?, lpparam: XC_LoadPackage.LoadPackageParam) {
         log(tagName,  "AaUiHook: ~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         hookBaseClick()
         hookLayout()
@@ -413,7 +413,7 @@ object AaUiHook: AaHook() {
         return fallback
     }
 
-    private fun hookFacetBar(config: SharedPreferences) {
+    private fun hookFacetBar(config: SharedPreferences?) {
         // VoiceAssistShell 为空 = 用 AA 默认助手；非空 = 操作栏助手图标点击改跑用户 root shell
         val enableDefVoiceAssist = AADisplayConfig.VoiceAssistShell.get(config).isNullOrBlank()
         val closeLauncherDashboard = AADisplayConfig.CloseLauncherDashboard.get(config)
@@ -695,7 +695,7 @@ object AaUiHook: AaHook() {
         return picked
     }
 
-    private fun hookRadius(config: SharedPreferences) {
+    private fun hookRadius(config: SharedPreferences?) {
         if(!AADisplayConfig.ForceRightAngle.get(config)){
             return
         }
