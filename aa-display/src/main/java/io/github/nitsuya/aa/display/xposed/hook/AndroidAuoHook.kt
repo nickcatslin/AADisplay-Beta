@@ -44,9 +44,14 @@ object AndroidAuoHook : BaseHook() {
         // The config file only exists once the module app has run at least once. Do not
         // give up when it is missing: every AADisplayConfig getter falls back to its default
         // for a null config, and the signature / UI hooks are needed regardless of settings.
-        val configPreferences: SharedPreferences? = XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName).takeIf { it.file.canRead() }
+        // Note: LSPosed redirects world-readable prefs to /data/misc/<uuid>/prefs/<module>/,
+        // so log the resolved path; it is the first thing to check when settings "don't apply".
+        val xPrefs = XSharedPreferences(BuildConfig.APPLICATION_ID, AADisplayConfig.ConfigName)
+        val configPreferences: SharedPreferences? = xPrefs.takeIf { it.file.canRead() }
         if (configPreferences == null) {
-            log(tagName, "config file not readable (module app never run?), using defaults")
+            log(tagName, "config not readable at ${xPrefs.file.path} (module app never run?), using defaults")
+        } else {
+            log(tagName, "config loaded from ${xPrefs.file.path}")
         }
 
         var onCreateApplication: XC_MethodHook.Unhook? = null

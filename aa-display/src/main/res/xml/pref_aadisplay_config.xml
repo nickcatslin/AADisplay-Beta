@@ -84,7 +84,7 @@
             app:singleLineTitle="true"
             app:key="VoiceAssistShell"
             app:title="Voice Assistant Shell"
-            app:summary="Root shell command to run on long-press of the assistant key. Empty = use Android Auto's built-in assistant. Example: am start com.miui.voiceassist/com.xiaomi.voiceassistant.CTAAlertActivity"
+            app:summary="Root shell command to run when the assistant key / icon is pressed. Empty = use Android Auto's built-in Google Assistant (recommended). Example for launching Google Assistant explicitly: am start -a android.intent.action.VOICE_COMMAND  (${DisplayId} is replaced with the mirrored display id)"
             app:useSimpleSummaryProvider="true"
             app:iconSpaceReserved="false"/>
 
