@@ -650,27 +650,72 @@ object AaUiHook: AaHook() {
         }
     }
 
+    // ProjectionWindowDecorationParams（GMS car 的 SafeParcelable，類名不混淆）。
+    // 建構子前 9 個參數跨版本穩定，順序由 toString() 證實：
+    //   0..3 outlineLeft/Top/Right/Bottom, 4 corners, 5 cornerRadius, 6 antiAliasingType,
+    //   7 showOutlinesOnlyWhenInset, 8 showRoundedCornersOnlyWhenInset
+    //  - AA ≤16.1：9 參
+    //  - AA 17.6：12 參，尾端追加 int borderWidth, DropShadowParams, ProjectionWindowDragParams
+    // 建構者是 :projection 的 system-UI 版面管理器（同一個類別也建 LayoutInfo），
+    // 以及 SafeParcel CREATOR；兩者都走這個建構子，所以 hook 建構子即可。
+    private const val DECORATION_CORNER_RADIUS_ARG = 5
+    private const val CLASS_DECORATION_PARAMS = "com.google.android.gms.car.ProjectionWindowDecorationParams"
+    @Volatile private var loggedRadiusDecision = false
+
+    private fun resolveDecorationParamsConstructor(): Constructor<*> {
+        val hasStablePrefix = { p: Array<Class<*>> ->
+            p.size >= 9
+                && (0..6).all { p[it] == Int::class.javaPrimitiveType }
+                && p[7] == Boolean::class.javaPrimitiveType
+                && p[8] == Boolean::class.javaPrimitiveType
+        }
+        val candidates = loadClass(CLASS_DECORATION_PARAMS).declaredConstructors.filter { hasStablePrefix(it.parameterTypes) }
+
+        // strict A — AA 17.6：12 參
+        val strict176 = candidates.firstOrNull { c ->
+            val p = c.parameterTypes
+            p.size == 12
+                && p[9] == Int::class.javaPrimitiveType
+                && p[10].name == "com.google.android.gms.car.DropShadowParams"
+                && p[11].name == "com.google.android.gms.car.ProjectionWindowDragParams"
+        }
+        // strict B — AA ≤16.1：9 參
+        val strict161 = candidates.firstOrNull { it.parameterCount == 9 }
+        // fallback — 只鎖穩定前綴，取參數最多的
+        val fallback = candidates.maxByOrNull { it.parameterCount }
+
+        val (picked, tag) = when {
+            strict176 != null -> strict176 to "strict 17.6"
+            strict161 != null -> strict161 to "strict 16.1"
+            fallback != null -> fallback to "fallback"
+            else -> throw NoSuchMethodException("AaUiHook: no compatible ProjectionWindowDecorationParams constructor (declared=${loadClass(CLASS_DECORATION_PARAMS).declaredConstructors.size})")
+        }
+        picked.isAccessible = true
+        log(tagName, "AaUiHook: ProjectionWindowDecorationParams ctor selected ($tag), paramCount=${picked.parameterCount}")
+        return picked
+    }
+
     private fun hookRadius(config: SharedPreferences) {
         if(!AADisplayConfig.ForceRightAngle.get(config)){
             return
         }
         try{
-            findConstructor("com.google.android.gms.car.ProjectionWindowDecorationParams"){
-                parameterCount == 9
-                && parameterTypes[0] == Int::class.javaPrimitiveType //outlineLeft
-                && parameterTypes[1] == Int::class.javaPrimitiveType //outlineTop
-                && parameterTypes[2] == Int::class.javaPrimitiveType //outlineRight
-                && parameterTypes[3] == Int::class.javaPrimitiveType //outlineBottom
-                && parameterTypes[4] == Int::class.javaPrimitiveType //corners
-                && parameterTypes[5] == Int::class.javaPrimitiveType //cornerRadius
-                && parameterTypes[6] == Int::class.javaPrimitiveType //antiAliasingType
-                && parameterTypes[7] == Boolean::class.javaPrimitiveType //showOutlinesOnlyWhenInset
-                && parameterTypes[8] == Boolean::class.javaPrimitiveType //showRoundedCornersOnlyWhenInset
-            }.hookBefore { param ->
-                param.args[5] = 0
+            resolveDecorationParamsConstructor().hookBefore { param ->
+                try {
+                    val original = param.args[DECORATION_CORNER_RADIUS_ARG]
+                    if (original != 0) {
+                        param.args[DECORATION_CORNER_RADIUS_ARG] = 0
+                        if (!loggedRadiusDecision) {
+                            loggedRadiusDecision = true
+                            log(tagName, "AaUiHook: ForceRightAngle -> cornerRadius $original => 0")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    log(tagName, "AaUiHook: ForceRightAngle hookBefore error", e)
+                }
             }
         } catch (e: Throwable) {
-            log(tagName, "ProjectionWindowDecorationParams", e)
+            log(tagName, "AaUiHook: ForceRightAngle disabled, ProjectionWindowDecorationParams ctor unresolved", e)
         }
     }
 

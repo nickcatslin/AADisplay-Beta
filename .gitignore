@@ -14,3 +14,6 @@ local.properties
 /CLAUDE.md
 aa-display/CLAUDE.md
 .claude/
+
+# Local copies of Android Auto APKs used for hook analysis
+/AAapk/
