@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.IPackageManager
 import android.content.res.Configuration
 import android.os.Build
+import android.view.Display
 import com.github.kyuubiran.ezxhelper.utils.*
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -77,6 +78,72 @@ object AndroidHook : BaseHook() {
             }
         }
 
+    }
+
+    /**
+     * "Screen Off Only" (AADisplayConfig.ScreenOffReplaceLockScreen).
+     *
+     * When the phone goes to sleep (power key / timeout) DisplayManager asks every display of the
+     * sleeping power group to switch to STATE_OFF via
+     * VirtualDisplayAdapter$VirtualDisplayDevice.requestDisplayStateLocked(). For our public
+     * PRESENTATION display that has two visible effects: the display is moved to the blank layer
+     * stack (black stream on the car) and WindowManager acquires a "Display-off" sleep token for
+     * it, which pauses every activity on it. In theory the display-bound SCREEN_BRIGHT wake lock
+     * held by DisplayWindow keeps our own display group awake, but on some builds (observed on a
+     * Pixel running Android 17) the projection still stops the moment the phone screen goes off.
+     *
+     * This hook makes the AADisplay virtual display immune: any requested state other than
+     * STATE_ON is rewritten to STATE_ON for the device whose name matches ours. Only that device
+     * is touched; Android Auto's own virtual displays and everything else are left alone.
+     * Signature-agnostic (the method gained a 4th parameter in Android 15), matched by name.
+     */
+    object VirtualDisplayKeepOn {
+        private const val CLASS_VIRTUAL_DISPLAY_DEVICE = "com.android.server.display.VirtualDisplayAdapter\$VirtualDisplayDevice"
+
+        private val requestDisplayStateLocked by lazy {
+            if(!IsSystemEnv) return@lazy null
+            try {
+                findAllMethods(loadClass(CLASS_VIRTUAL_DISPLAY_DEVICE)) {
+                    name == "requestDisplayStateLocked"
+                        && parameterCount >= 1
+                        && parameterTypes[0] == Int::class.javaPrimitiveType // state
+                }.also {
+                    if (it.isEmpty()) log(tagName, "VirtualDisplayKeepOn: requestDisplayStateLocked not found")
+                }
+            } catch (e: Throwable) {
+                log(tagName, "VirtualDisplayKeepOn: $CLASS_VIRTUAL_DISPLAY_DEVICE.requestDisplayStateLocked", e)
+                null
+            }
+        }
+
+        @Volatile private var displayName: String? = null
+        private var hooks: List<XC_MethodHook.Unhook> = emptyList()
+
+        /** @param name the VirtualDisplay name passed to DisplayManager.createVirtualDisplay(). */
+        fun hook(name: String) {
+            unHook()
+            displayName = name
+            hooks = requestDisplayStateLocked?.hookBefore { param ->
+                try {
+                    val target = displayName ?: return@hookBefore
+                    if (param.thisObject.getObjectOrNull("mName") != target) return@hookBefore
+                    val state = param.args[0] as Int
+                    if (state != Display.STATE_ON) {
+                        log(tagName, "VirtualDisplayKeepOn: '$target' requested state $state -> forced STATE_ON")
+                        param.args[0] = Display.STATE_ON
+                    }
+                } catch (e: Throwable) {
+                    log(tagName, "VirtualDisplayKeepOn hook error", e)
+                }
+            } ?: emptyList()
+            log(tagName, "VirtualDisplayKeepOn: hooked ${hooks.size} method(s) for '$name'")
+        }
+
+        fun unHook() {
+            hooks.forEach { it.unhook() }
+            hooks = emptyList()
+            displayName = null
+        }
     }
 
     object FuckAppUseApplicationContext {

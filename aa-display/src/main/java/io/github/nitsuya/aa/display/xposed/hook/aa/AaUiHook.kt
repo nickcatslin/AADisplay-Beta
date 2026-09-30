@@ -14,6 +14,7 @@ import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
 import com.github.kyuubiran.ezxhelper.init.InitFields
 import com.github.kyuubiran.ezxhelper.utils.argTypes
+import com.github.kyuubiran.ezxhelper.utils.findAllConstructors
 import com.github.kyuubiran.ezxhelper.utils.findConstructor
 import com.github.kyuubiran.ezxhelper.utils.findMethod
 import com.github.kyuubiran.ezxhelper.utils.getIdByName
@@ -37,23 +38,38 @@ import io.github.qauxv.ui.CommonContextWrapper
 import kotlinx.coroutines.delay
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.StringMatchType
+import java.lang.ref.WeakReference
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
+import java.util.Collections
 
 object AaUiHook: AaHook() {
     override val tagName: String = "AAD_AaUiHook"
 
     private var layoutInfoConstructor: Constructor<*>? = null
-    private var startMethod: Method? = null
+
+    // 啟動車機 app（Auto Open 用）的兩條路：
+    //  - AA ≤17.6：CarSystemUiControllerService 的 static a(Intent)
+    //  - AA 17.7+：CarSystemUiControllerService 已被移除（manifest 與 dex 都沒有），改由
+    //    AppDecorService 的每個 CarRegion 各持有一個 binder stub（17.7 混淆名 rfr），其
+    //    h(Intent) 即 startCarActivity（log 字串 "startCarActivity for %s on %s"）。用 DexKit
+    //    以該字串找方法、hook 該類建構子抓實例，之後對最新的存活實例呼叫。
+    private var startMethodStatic: Method? = null
+    private var startMethodInstance: Method? = null
+    private val carActivityStarters = Collections.synchronizedList(ArrayList<WeakReference<Any>>())
 
     // Auto Open 每次投影連線只觸發一次。操作欄是 Fragment 的固定 layout，日夜主題切換、
     // 直排欄/底欄切換等都會重新 inflate，若每次都觸發會把使用者從其他 AA app 拉回 AADisplay。
-    // 以 CarSystemUiControllerService 的生命週期當作「一次連線」：onCreate 時重設旗標。
-    // 若該 onCreate hook 掛不上，就停用這層保護，退回原本每次 inflate 都觸發的行為，
-    // 避免 :projection 行程跨連線存活時第二次連線永遠不自動開啟。
+    // 以 system-UI 服務（≤17.6 CarSystemUiControllerService、17.7+ AppDecorService）的生命週期
+    // 當作「一次連線」：onCreate 時重設旗標。若該 onCreate hook 掛不上，就停用這層保護，
+    // 退回原本每次 inflate 都觸發的行為，避免 :projection 行程跨連線存活時第二次連線永遠不自動開啟。
     private var sysUiServiceClass: Class<*>? = null
     @Volatile private var autoOpenGuardEnabled = false
     @Volatile private var autoOpenedThisSession = false
+
+    private const val CLASS_SYSUI_SERVICE_LEGACY = "com.google.android.projection.gearhead.service.CarSystemUiControllerService"
+    private const val CLASS_SYSUI_SERVICE_177 = "com.google.android.gearhead.appdecor.AppDecorService"
+    private const val STRING_START_CAR_ACTIVITY = "startCarActivity for %s on %s"
 
     private var resLayoutLeftResourceId: Int = 0
     private var resLayoutRightResourceId: Int = 0
@@ -71,6 +87,9 @@ object AaUiHook: AaHook() {
     // 不用 PORTRAIT_STANDARD：那是双拼布局（上半地图 widget + 下半 app），
     // 会让镜像内容只占下半屏、上半被 AA 默认 Google Maps 占（实机已证）。
     private const val ENUM_PORTRAIT_SHORT = "PORTRAIT_SHORT"
+    // int 型 layoutType（AA ≤16.1 / 17.7+）：11=PORTRAIT, 12=PORTRAIT_SHORT, 17=PORTRAIT_NARROW
+    private const val INT_LAYOUT_PORTRAIT_SHORT = 12
+    private val INT_LAYOUT_PORTRAIT_TYPES = setOf(11, INT_LAYOUT_PORTRAIT_SHORT, 17)
 
     // 不改写的 layoutType（按 Enum.name() 前缀/全名判断，跨版本稳定）：
     // CLUSTER_* = 仪表盘独立物理屏，AUXILIARY_* = 副屏，UNKNOWN_LAYOUT = 未定，
@@ -148,12 +167,7 @@ object AaUiHook: AaHook() {
             log(tagName, "AaUiHook: resolveLayoutInfoConstructor failed for ${classes[0].name}", e)
         }.getOrNull()
 
-        try{
-            sysUiServiceClass = loadClass("com.google.android.projection.gearhead.service.CarSystemUiControllerService")
-            startMethod = sysUiServiceClass!!.staticMethod("a", null, argTypes(Intent::class.java))
-        } catch (e: Throwable){
-            log(tagName,  "AaUiHook: not found CarSystemUiControllerService.a static method", e)
-        }
+        resolveCarActivityStarter(bridge, lpparam)
 
         resLayoutFacetBarIds.clear()
         for (fbn in arrayOf("gh_coolwalk_vertical_facet_bar", "gh_coolwalk_facet_bar", "gh_coolwalk_facet_bar_rhd")) {
@@ -205,20 +219,111 @@ object AaUiHook: AaHook() {
         hookRadius(config)
     }
 
+    /**
+     * Resolves how Auto Open starts the AADisplay car activity from inside :projection.
+     *  1. AA ≤17.6: CarSystemUiControllerService.a(Intent) static.
+     *  2. AA 17.7+: the class is gone. Locate the per-region startCarActivity implementation by
+     *     its log string, remember its class so [hookAutoOpenSession] can capture live instances.
+     * Both failures are logged, never thrown (would abort the whole hook chain).
+     */
+    private fun resolveCarActivityStarter(bridge: DexKitBridge, lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val legacy = loadClass(CLASS_SYSUI_SERVICE_LEGACY)
+            startMethodStatic = legacy.staticMethod("a", null, argTypes(Intent::class.java))
+            sysUiServiceClass = legacy
+            log(tagName, "AaUiHook: car activity starter = $CLASS_SYSUI_SERVICE_LEGACY.a(Intent) (AA <= 17.6)")
+        }.onFailure { e ->
+            log(tagName, "AaUiHook: $CLASS_SYSUI_SERVICE_LEGACY.a(Intent) not found (${e.javaClass.simpleName}), trying AA 17.7+ path")
+        }
+        if (startMethodStatic != null) return
+
+        runCatching {
+            sysUiServiceClass = loadClass(CLASS_SYSUI_SERVICE_177)
+            log(tagName, "AaUiHook: session marker = $CLASS_SYSUI_SERVICE_177")
+        }.onFailure { e ->
+            log(tagName, "AaUiHook: $CLASS_SYSUI_SERVICE_177 not found either, auto-open session guard disabled", e)
+        }
+
+        runCatching {
+            val methods = bridge.findMethod {
+                matcher {
+                    usingStrings {
+                        add(STRING_START_CAR_ACTIVITY, StringMatchType.Equals, false)
+                    }
+                    paramTypes("android.content.Intent")
+                    returnType = "void"
+                }
+            }
+            if (methods.size != 1) {
+                throw NoSuchMethodException("expected exactly one (Intent)V method using \"$STRING_START_CAR_ACTIVITY\", got ${methods.size}: ${methods.joinToString { "${it.className}.${it.methodName}" }}")
+            }
+            val m = methods[0].getMethodInstance(lpparam.classLoader).apply { isAccessible = true }
+            startMethodInstance = m
+            log(tagName, "AaUiHook: car activity starter = ${m.declaringClass.name}.${m.name}(Intent) (AA 17.7+, instance captured via ctor hook)")
+        }.onFailure { e ->
+            log(tagName, "AaUiHook: startCarActivity(Intent) not resolved, Auto Open cannot start AADisplay on this AA version", e)
+        }
+    }
+
+    /** Starts a car activity; true when a call was actually dispatched. */
+    private fun startCarActivity(intent: Intent): Boolean {
+        startMethodStatic?.let { m ->
+            m.invoke(null, intent)
+            return true
+        }
+        val m = startMethodInstance ?: run {
+            log(tagName, "AaUiHook: no car activity starter resolved, skip")
+            return false
+        }
+        // One stub per CarRegion, created in region order (primary first) once per session;
+        // the list is reset on the service's onCreate/onDestroy, so the first live one is primary.
+        val target = synchronized(carActivityStarters) {
+            carActivityStarters.removeAll { it.get() == null }
+            carActivityStarters.firstOrNull()?.get()
+        }
+        if (target == null) {
+            log(tagName, "AaUiHook: ${m.declaringClass.name} instance not captured yet, skip")
+            return false
+        }
+        m.invoke(target, intent)
+        return true
+    }
+
     private fun hookAutoOpenSession() {
+        // AA 17.7+: capture the per-region starter instances (created once per session).
+        startMethodInstance?.declaringClass?.let { starterClass ->
+            runCatching {
+                findAllConstructors(starterClass) { true }.hookAfter { param ->
+                    synchronized(carActivityStarters) {
+                        carActivityStarters.removeAll { it.get() == null }
+                        carActivityStarters.add(WeakReference(param.thisObject))
+                    }
+                    log(tagName, "AaUiHook: captured ${starterClass.name} instance (${param.thisObject}), total=${carActivityStarters.size}")
+                }
+            }.onFailure { e ->
+                log(tagName, "AaUiHook: cannot hook ${starterClass.name} constructors, Auto Open disabled", e)
+            }
+        }
+
         val clazz = sysUiServiceClass
         if (clazz == null) {
-            log(tagName, "AaUiHook: CarSystemUiControllerService unresolved, auto-open once-per-session guard disabled")
+            log(tagName, "AaUiHook: system-UI service unresolved, auto-open once-per-session guard disabled")
             return
         }
         try {
             findMethod(clazz) { name == "onCreate" && parameterCount == 0 }.hookAfter {
                 autoOpenedThisSession = false
-                log(tagName, "AaUiHook: CarSystemUiControllerService.onCreate -> new projection session, auto-open re-armed")
+                synchronized(carActivityStarters) { carActivityStarters.clear() }
+                log(tagName, "AaUiHook: ${clazz.simpleName}.onCreate -> new projection session, auto-open re-armed")
             }
             autoOpenGuardEnabled = true
         } catch (e: Throwable) {
-            log(tagName, "AaUiHook: CarSystemUiControllerService.onCreate not hookable, auto-open once-per-session guard disabled", e)
+            log(tagName, "AaUiHook: ${clazz.name}.onCreate not hookable, auto-open once-per-session guard disabled", e)
+        }
+        runCatching {
+            findMethod(clazz) { name == "onDestroy" && parameterCount == 0 }.hookAfter {
+                synchronized(carActivityStarters) { carActivityStarters.clear() }
+            }
         }
     }
 
@@ -295,13 +400,32 @@ object AaUiHook: AaHook() {
                 val layoutTypeArg = param.args[3]
 
                 when (layoutTypeArg) {
-                    // 16.1 及更早：layoutType 是 int，3=左舵竖排栏 4=右舵竖排栏，8/9/10=cluster/auxiliary 跳过
+                    // layoutType 是 int（AA ≤16.1 以及 17.7+；17.7 把 16.7 的 enum 又改回 proto
+                    // 風格的 int，值 = ordinal+1，編號跨版本不變）。3=左舵竖排栏 4=右舵竖排栏，
+                    // 8/9/10=cluster/cluster_with_launcher/auxiliary 跳过，11/12/17=portrait/
+                    // portrait_short/portrait_narrow（17.7 dex 對照 nxj.m() 的 switch 表得證）。
                     is Int -> {
                         when (layoutTypeArg) {
                             8, 9, 10 -> return@hookBefore
                         }
+                        // 竖屏车机：与 enum 路径同样改成 single-pane 的 PORTRAIT_SHORT + short portrait
+                        // 布局（enum 与 resId 必须一起改，否则 AA 仍按双拼分出第二个内容面）。
+                        if (layoutTypeArg in INT_LAYOUT_PORTRAIT_TYPES) {
+                            val portraitResId = resolvePortraitResId()
+                            if (portraitResId != 0) {
+                                param.args[0] = portraitResId
+                                param.args[3] = INT_LAYOUT_PORTRAIT_SHORT
+                                bottomBarMode = true
+                                if (!loggedPortraitDecision) {
+                                    loggedPortraitDecision = true
+                                    log(tagName, "AaUiHook: layout portrait(int) $layoutTypeArg -> $INT_LAYOUT_PORTRAIT_SHORT, resId=$portraitResId (bottom bar, single-pane)")
+                                }
+                                return@hookBefore
+                            }
+                            log(tagName, "AaUiHook: portrait resId unavailable for int type $layoutTypeArg, fallback to vertical rail")
+                        }
                         val isRightHandDrive = param.args[4] as Boolean
-                        bottomBarMode = false // int 路径=旧 AA(≤16.1)，竖排栏；竖屏底栏只走 16.7 enum 路径
+                        bottomBarMode = false // 横屏内容屏：竖排栏，facet bar 竖向排布
                         param.args[0] = resolveVerticalRailResId(isRightHandDrive)
                         param.args[3] = if (isRightHandDrive) 4 else 3 // layoutType left:3 right:4
                         if (param.args.size > 5 && param.args[5] is Boolean) {
@@ -486,12 +610,15 @@ object AaUiHook: AaHook() {
                         runMain {
                             delay(1000)
                             try{
-                                startMethod?.invoke(null, Intent().apply {
+                                val started = startCarActivity(Intent().apply {
                                     component = ComponentName(BuildConfig.APPLICATION_ID, AaActivityService::class.java.name)
                                     putExtra("android.intent.extra.PACKAGE_NAME", BuildConfig.APPLICATION_ID)
                                 })
+                                // Nothing was dispatched (starter instance not captured yet):
+                                // let the next facet bar inflate retry instead of losing the session.
+                                if (!started) autoOpenedThisSession = false
                             } catch (e: Throwable) {
-                                log(tagName, "CarSystemUiControllerService.a start app error", e)
+                                log(tagName, "AaUiHook: auto-open startCarActivity error", e)
                             }
                         }
                     }

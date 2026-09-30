@@ -6,7 +6,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.os.CountDownTimer
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.PowerManagerHidden
 import android.os.SystemClock
@@ -79,6 +82,26 @@ class DisplayWindow(
         if (value < 0) 0 else value
     }
 
+    // "Screen Off Only": pin the virtual display ON in system_server so the phone can sleep
+    // normally while the mirrored app keeps running on the car (see AndroidHook.VirtualDisplayKeepOn).
+    private val mScreenOffReplaceLockScreen = AADisplayConfig.ScreenOffReplaceLockScreen.get(CoreManagerService.config)
+
+    // Diagnostics only: log every state change of our virtual display together with the phone
+    // screen state, so "the projection went black when I pressed the power key" reports carry
+    // the DisplayManager side of the story (grep "virtual display" in the LSPosed log).
+    private val displayStateMonitor = object : DisplayManager.DisplayListener {
+        private var lastState = Display.STATE_UNKNOWN
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != displayAdapter.mDisplayId) return
+            val state = Instances.displayManager.getDisplay(displayId)?.state ?: return
+            if (state == lastState) return
+            lastState = state
+            log(TAG, "virtual display $displayId state -> $state (phone screen on=${isDefaultDisplayOn()}, screenOffOnly=$mScreenOffReplaceLockScreen)")
+        }
+    }
+
     private val isSupportInteractive = RomUtil.isMiui()
     private var interactiveMonitor = object: BroadcastReceiver(){
         val monitor by lazy {
@@ -126,6 +149,12 @@ class DisplayWindow(
                     monitor.acquire()
                 }
             }
+            // "Screen Off Only": the wake lock above is not enough on every build, so additionally
+            // refuse any STATE_OFF request for our display inside DisplayManagerService.
+            if (mScreenOffReplaceLockScreen) {
+                AndroidHook.VirtualDisplayKeepOn.hook(displayAdapter.mVirtualDisplay.display.name)
+            }
+            tryOrNull { Instances.displayManager.registerDisplayListener(displayStateMonitor, Handler(Looper.getMainLooper())) }
             AndroidHook.FuckAppUseApplicationContext.hook()
         }
         fun release(){
@@ -135,6 +164,8 @@ class DisplayWindow(
             } else {
                 monitor.release()
             }
+            AndroidHook.VirtualDisplayKeepOn.unHook()
+            tryOrNull { Instances.displayManager.unregisterDisplayListener(displayStateMonitor) }
             AndroidHook.FuckAppUseApplicationContext.unHook()
         }
     }

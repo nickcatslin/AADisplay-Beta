@@ -70,6 +70,13 @@
             app:summary="Square off the projected screen corners (disable rounded corners)"
             app:iconSpaceReserved="false"/>
 
+        <rikka.material.preference.MaterialSwitchPreference
+            app:defaultValue="false"
+            app:key="ScreenOffReplaceLockScreen"
+            app:title="Screen Off Only"
+            app:summary="Power key / screen timeout only turns off the phone screen: the mirrored app keeps running on the car (the virtual display is pinned ON in system_server). Reconnect Android Auto after changing."
+            app:iconSpaceReserved="false"/>
+
         <ListPreference
             app:key="DisplayImePolicy"
             app:defaultValue="1"

@@ -21,6 +21,9 @@ sealed class AADisplayConfig<T>(val key: String) {
     object DelayDestroyTime: IntConfig("DelayDestroyTime", 180)
     object CloseLauncherDashboard: BooleanConfig("CloseLauncherDashboard", true)
     object ForceRightAngle: BooleanConfig("ForceRightAngle", true)
+    // "Screen Off Only": keep the mirrored app running on the car while the phone screen is off.
+    // Implemented by pinning the virtual display ON in system_server (AndroidHook.VirtualDisplayKeepOn).
+    object ScreenOffReplaceLockScreen: BooleanConfig("ScreenOffReplaceLockScreen", false)
     object DisplayImePolicy: IntConfig("DisplayImePolicy", 1) //WindowManager.DISPLAY_IME_POLICY_LOCAL:0, WindowManager.DISPLAY_IME_POLICY_FALLBACK_DISPLAY:1
     object VoiceAssistShell: StringConfig("VoiceAssistShell", null)
     object CreateVirtualDisplayBefore: ArrayStringConfig("CreateVirtualDisplayBefore")
