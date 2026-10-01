@@ -150,9 +150,10 @@ class DisplayWindow(
                 }
             }
             // "Screen Off Only": the wake lock above is not enough on every build, so additionally
-            // refuse any STATE_OFF request for our display inside DisplayManagerService.
+            // keep the DisplayPowerController of our display on a BRIGHT policy and refuse any
+            // STATE_OFF request for it inside DisplayManagerService.
             if (mScreenOffReplaceLockScreen) {
-                AndroidHook.VirtualDisplayKeepOn.hook(displayAdapter.mVirtualDisplay.display.name)
+                AndroidHook.VirtualDisplayKeepOn.hook(displayAdapter.mVirtualDisplay.display.name, displayAdapter.mDisplayId)
             }
             tryOrNull { Instances.displayManager.registerDisplayListener(displayStateMonitor, Handler(Looper.getMainLooper())) }
             AndroidHook.FuckAppUseApplicationContext.hook()

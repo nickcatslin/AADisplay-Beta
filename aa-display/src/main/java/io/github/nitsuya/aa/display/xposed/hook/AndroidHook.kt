@@ -99,6 +99,42 @@ object AndroidHook : BaseHook() {
      */
     object VirtualDisplayKeepOn {
         private const val CLASS_VIRTUAL_DISPLAY_DEVICE = "com.android.server.display.VirtualDisplayAdapter\$VirtualDisplayDevice"
+        private const val CLASS_DISPLAY_POWER_REQUEST = "android.hardware.display.DisplayManagerInternal\$DisplayPowerRequest"
+        // Android 14 shipped both (flag-selected); 15+ only has DisplayPowerController.
+        private val CLASSES_DISPLAY_POWER_CONTROLLER = arrayOf(
+            "com.android.server.display.DisplayPowerController",
+            "com.android.server.display.DisplayPowerController2",
+        )
+        private const val POLICY_BRIGHT = 3 // DisplayPowerRequest.POLICY_BRIGHT
+
+        /**
+         * Upstream choke point. Field test on a Pixel / Android 17 showed that forcing the device
+         * state alone is not enough: the car still goes black although every STATE_OFF request was
+         * rewritten. The reason is the per-display DisplayPowerController: on an OFF policy it
+         * first drops the ColorFade level to 0 (a black surface on the display's layer stack) and
+         * only then asks for STATE_OFF. So the request itself must never reach our display: when
+         * PowerManager hands the controller for our displayId a non-BRIGHT policy, substitute a
+         * copy of the request whose policy is BRIGHT. The request object is shared with every
+         * other display of the group, hence the copy.
+         */
+        private val dpcRequestPowerState by lazy {
+            if(!IsSystemEnv) return@lazy null
+            CLASSES_DISPLAY_POWER_CONTROLLER.flatMap { cls ->
+                try {
+                    findAllMethods(loadClass(cls)) {
+                        name == "requestPowerState"
+                            && parameterCount == 2
+                            && parameterTypes[0].name == CLASS_DISPLAY_POWER_REQUEST
+                            && parameterTypes[1] == Boolean::class.javaPrimitiveType
+                    }.toList()
+                } catch (e: Throwable) {
+                    log(tagName, "VirtualDisplayKeepOn: $cls.requestPowerState unavailable (${e.javaClass.simpleName})")
+                    emptyList()
+                }
+            }.also {
+                if (it.isEmpty()) log(tagName, "VirtualDisplayKeepOn: no DisplayPowerController.requestPowerState found")
+            }
+        }
 
         private val requestDisplayStateLocked by lazy {
             if(!IsSystemEnv) return@lazy null
@@ -117,13 +153,34 @@ object AndroidHook : BaseHook() {
         }
 
         @Volatile private var displayName: String? = null
+        @Volatile private var displayId: Int = -1
         private var hooks: List<XC_MethodHook.Unhook> = emptyList()
 
-        /** @param name the VirtualDisplay name passed to DisplayManager.createVirtualDisplay(). */
-        fun hook(name: String) {
+        /**
+         * @param name the VirtualDisplay name passed to DisplayManager.createVirtualDisplay().
+         * @param id   its logical display id.
+         */
+        fun hook(name: String, id: Int) {
             unHook()
             displayName = name
-            hooks = requestDisplayStateLocked?.hookBefore { param ->
+            displayId = id
+            val dpcHooks = dpcRequestPowerState?.hookBefore { param ->
+                try {
+                    val target = displayId
+                    if (target < 0 || param.thisObject.getObjectOrNull("mDisplayId") != target) return@hookBefore
+                    val request = param.args[0] ?: return@hookBefore
+                    val policyField = request.javaClass.getField("policy")
+                    val policy = policyField.getInt(request)
+                    if (policy == POLICY_BRIGHT) return@hookBefore
+                    val copy = request.javaClass.getConstructor(request.javaClass).newInstance(request)
+                    policyField.setInt(copy, POLICY_BRIGHT)
+                    param.args[0] = copy
+                    log(tagName, "VirtualDisplayKeepOn: display $target power policy $policy -> BRIGHT")
+                } catch (e: Throwable) {
+                    log(tagName, "VirtualDisplayKeepOn requestPowerState hook error", e)
+                }
+            } ?: emptyList()
+            val deviceHooks = requestDisplayStateLocked?.hookBefore { param ->
                 try {
                     val target = displayName ?: return@hookBefore
                     if (param.thisObject.getObjectOrNull("mName") != target) return@hookBefore
@@ -136,13 +193,15 @@ object AndroidHook : BaseHook() {
                     log(tagName, "VirtualDisplayKeepOn hook error", e)
                 }
             } ?: emptyList()
-            log(tagName, "VirtualDisplayKeepOn: hooked ${hooks.size} method(s) for '$name'")
+            hooks = dpcHooks + deviceHooks
+            log(tagName, "VirtualDisplayKeepOn: hooked ${dpcHooks.size} requestPowerState + ${deviceHooks.size} requestDisplayStateLocked for '$name' (display $id)")
         }
 
         fun unHook() {
             hooks.forEach { it.unhook() }
             hooks = emptyList()
             displayName = null
+            displayId = -1
         }
     }
 

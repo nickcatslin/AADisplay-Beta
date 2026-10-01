@@ -311,10 +311,16 @@ object AaUiHook: AaHook() {
             return
         }
         try {
-            findMethod(clazz) { name == "onCreate" && parameterCount == 0 }.hookAfter {
-                autoOpenedThisSession = false
+            val onCreate = findMethod(clazz) { name == "onCreate" && parameterCount == 0 }
+            // Reset BEFORE onCreate runs: AppDecorService.onCreate itself creates the per-region
+            // starter stubs, so clearing afterwards (as the first 17.7 build did) threw away every
+            // instance captured a few ms earlier and Auto Open logged "instance not captured yet".
+            onCreate.hookBefore {
                 synchronized(carActivityStarters) { carActivityStarters.clear() }
-                log(tagName, "AaUiHook: ${clazz.simpleName}.onCreate -> new projection session, auto-open re-armed")
+            }
+            onCreate.hookAfter {
+                autoOpenedThisSession = false
+                log(tagName, "AaUiHook: ${clazz.simpleName}.onCreate -> new projection session, auto-open re-armed (starters=${carActivityStarters.size})")
             }
             autoOpenGuardEnabled = true
         } catch (e: Throwable) {

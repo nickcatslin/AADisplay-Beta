@@ -126,14 +126,16 @@ class AaVirtualDisplayAdapter(
         mDisplayId = mVirtualDisplay.display.displayId
         mDensityDpi = densityDpi
 
-        try {
-            Instances.iWindowManager.apply {
-                setDisplayImePolicy(mDisplayId, AADisplayConfig.DisplayImePolicy.get(config))
-                setShouldShowWithInsecureKeyguard(mDisplayId, false)
-                setShouldShowSystemDecors(mDisplayId, false)
-            }
-        } catch (e : Throwable){
-            log(TAG, "设置虚拟屏幕参数失败: ", e)
+        // Each call isolated: on Android 17 setShouldShowSystemDecors(int, boolean) no longer
+        // exists on IWindowManager (NoSuchMethodError), and one failure must not skip the others.
+        // Not showing system decors is the default for a virtual display anyway.
+        Instances.iWindowManager.apply {
+            runCatching { setDisplayImePolicy(mDisplayId, AADisplayConfig.DisplayImePolicy.get(config)) }
+                .onFailure { log(TAG, "setDisplayImePolicy failed: ", it) }
+            runCatching { setShouldShowWithInsecureKeyguard(mDisplayId, false) }
+                .onFailure { log(TAG, "setShouldShowWithInsecureKeyguard failed: ", it) }
+            runCatching { setShouldShowSystemDecors(mDisplayId, false) }
+                .onFailure { log(TAG, "setShouldShowSystemDecors failed (harmless, default is false): ${it.javaClass.simpleName}: ${it.message}") }
         }
         //mDisplayWindowManager = context.createDisplayContext(mVirtualDisplay.display).getSystemService(WindowManager::class.java).apply {
         mDisplayWindowManager = context.createDisplayContext(mVirtualDisplay.display).createWindowContext(mVirtualDisplay.display, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null).getSystemService(WindowManager::class.java).apply {
