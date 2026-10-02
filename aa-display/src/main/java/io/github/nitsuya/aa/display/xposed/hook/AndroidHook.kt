@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.IPackageManager
 import android.content.res.Configuration
 import android.os.Build
+import android.util.SparseBooleanArray
 import android.view.Display
 import com.github.kyuubiran.ezxhelper.utils.*
 import de.robv.android.xposed.XC_MethodHook
@@ -136,6 +137,32 @@ object AndroidHook : BaseHook() {
             }
         }
 
+        /**
+         * Input side. Android 17 (verified on the phone's own services.jar) assigns every virtual
+         * display to the default display group when DisplayManagerFlags.separateTimeouts is on:
+         * DisplayGroupAllocator only grants a separate group ("secondary_mode") to desktop-capable
+         * EXTERNAL / OVERLAY displays, so FLAG_OWN_DISPLAY_GROUP is ignored for us and the display
+         * is reported non-interactive together with the phone screen. The dispatcher then routes
+         * every injected touch / key through the non-interactive policy and drops it. PowerManager
+         * publishes that state through InputManagerInternal.setDisplayInteractivities(); mark our
+         * display interactive in a copy of the map before it reaches InputManagerService.
+         */
+        private val imsSetDisplayInteractivities by lazy {
+            if(!IsSystemEnv) return@lazy null
+            try {
+                findAllMethods(loadClass("com.android.server.input.InputManagerService\$LocalService")) {
+                    name == "setDisplayInteractivities"
+                        && parameterCount == 1
+                        && parameterTypes[0] == SparseBooleanArray::class.java
+                }.also {
+                    if (it.isEmpty()) log(tagName, "VirtualDisplayKeepOn: InputManagerService.setDisplayInteractivities not found (pre-Android 15?)")
+                }
+            } catch (e: Throwable) {
+                log(tagName, "VirtualDisplayKeepOn: InputManagerService\$LocalService unavailable (${e.javaClass.simpleName})")
+                null
+            }
+        }
+
         private val requestDisplayStateLocked by lazy {
             if(!IsSystemEnv) return@lazy null
             try {
@@ -180,6 +207,20 @@ object AndroidHook : BaseHook() {
                     log(tagName, "VirtualDisplayKeepOn requestPowerState hook error", e)
                 }
             } ?: emptyList()
+            val inputHooks = imsSetDisplayInteractivities?.hookBefore { param ->
+                try {
+                    val target = displayId
+                    if (target < 0) return@hookBefore
+                    val map = param.args[0] as? SparseBooleanArray ?: return@hookBefore
+                    // Absent = interactive as far as InputManagerService is concerned; only flip false.
+                    if (map.indexOfKey(target) < 0 || map.get(target)) return@hookBefore
+                    val copy = map.clone().apply { put(target, true) }
+                    param.args[0] = copy
+                    log(tagName, "VirtualDisplayKeepOn: display $target reported non-interactive -> kept interactive")
+                } catch (e: Throwable) {
+                    log(tagName, "VirtualDisplayKeepOn setDisplayInteractivities hook error", e)
+                }
+            } ?: emptyList()
             val deviceHooks = requestDisplayStateLocked?.hookBefore { param ->
                 try {
                     val target = displayName ?: return@hookBefore
@@ -193,8 +234,8 @@ object AndroidHook : BaseHook() {
                     log(tagName, "VirtualDisplayKeepOn hook error", e)
                 }
             } ?: emptyList()
-            hooks = dpcHooks + deviceHooks
-            log(tagName, "VirtualDisplayKeepOn: hooked ${dpcHooks.size} requestPowerState + ${deviceHooks.size} requestDisplayStateLocked for '$name' (display $id)")
+            hooks = dpcHooks + inputHooks + deviceHooks
+            log(tagName, "VirtualDisplayKeepOn: hooked ${dpcHooks.size} requestPowerState + ${inputHooks.size} setDisplayInteractivities + ${deviceHooks.size} requestDisplayStateLocked for '$name' (display $id)")
         }
 
         fun unHook() {
