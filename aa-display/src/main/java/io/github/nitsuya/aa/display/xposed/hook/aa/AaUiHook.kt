@@ -14,7 +14,6 @@ import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
 import com.github.kyuubiran.ezxhelper.init.InitFields
 import com.github.kyuubiran.ezxhelper.utils.argTypes
-import com.github.kyuubiran.ezxhelper.utils.findAllConstructors
 import com.github.kyuubiran.ezxhelper.utils.findConstructor
 import com.github.kyuubiran.ezxhelper.utils.findMethod
 import com.github.kyuubiran.ezxhelper.utils.getIdByName
@@ -38,10 +37,9 @@ import io.github.qauxv.ui.CommonContextWrapper
 import kotlinx.coroutines.delay
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.enums.StringMatchType
-import java.lang.ref.WeakReference
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
-import java.util.Collections
+import java.lang.reflect.Modifier
 
 object AaUiHook: AaHook() {
     override val tagName: String = "AAD_AaUiHook"
@@ -50,13 +48,17 @@ object AaUiHook: AaHook() {
 
     // 啟動車機 app（Auto Open 用）的兩條路：
     //  - AA ≤17.6：CarSystemUiControllerService 的 static a(Intent)
-    //  - AA 17.7+：CarSystemUiControllerService 已被移除（manifest 與 dex 都沒有），改由
-    //    AppDecorService 的每個 CarRegion 各持有一個 binder stub（17.7 混淆名 rfr），其
-    //    h(Intent) 即 startCarActivity（log 字串 "startCarActivity for %s on %s"）。用 DexKit
-    //    以該字串找方法、hook 該類建構子抓實例，之後對最新的存活實例呼叫。
+    //  - AA 17.7+：CarSystemUiControllerService 已被移除。改走 AA 自己 app 列表點擊的同一路徑
+    //    （17.7 的 mwd.b，log "launch %s"）：<starter>.a() 單例（AA 服務定位器取得）
+    //    .k(Intent, <ActivityOptions>)，k 內含 log 字串 "startCarActivity(intent:%s, activityOptions:%s)"。
+    //    用 DexKit 以該字串找 k，再在同一類別找「無參數、回傳自身」的 static 方法當單例取得器，
+    //    options 以其無參數建構子建立（等同 AA 的單參數包裝 mtp.i(Intent)）。
+    //    註：第一版用的 AppDecorService 每區塊 binder stub（rfr.h）是給外部 app 跨行程呼叫的，
+    //    會比對 Binder.getCallingUid() 的套件；從 AA 自己行程呼叫時身分不符而被靜默丟棄。
     private var startMethodStatic: Method? = null
-    private var startMethodInstance: Method? = null
-    private val carActivityStarters = Collections.synchronizedList(ArrayList<WeakReference<Any>>())
+    private var startMethod177: Method? = null
+    private var starterSingleton177: Method? = null
+    private var startOptionsCtor177: Constructor<*>? = null
 
     // Auto Open 每次投影連線只觸發一次。操作欄是 Fragment 的固定 layout，日夜主題切換、
     // 直排欄/底欄切換等都會重新 inflate，若每次都觸發會把使用者從其他 AA app 拉回 AADisplay。
@@ -69,7 +71,7 @@ object AaUiHook: AaHook() {
 
     private const val CLASS_SYSUI_SERVICE_LEGACY = "com.google.android.projection.gearhead.service.CarSystemUiControllerService"
     private const val CLASS_SYSUI_SERVICE_177 = "com.google.android.gearhead.appdecor.AppDecorService"
-    private const val STRING_START_CAR_ACTIVITY = "startCarActivity for %s on %s"
+    private const val STRING_START_CAR_ACTIVITY = "startCarActivity(intent:%s, activityOptions:%s)"
 
     private var resLayoutLeftResourceId: Int = 0
     private var resLayoutRightResourceId: Int = 0
@@ -222,8 +224,8 @@ object AaUiHook: AaHook() {
     /**
      * Resolves how Auto Open starts the AADisplay car activity from inside :projection.
      *  1. AA ≤17.6: CarSystemUiControllerService.a(Intent) static.
-     *  2. AA 17.7+: the class is gone. Locate the per-region startCarActivity implementation by
-     *     its log string, remember its class so [hookAutoOpenSession] can capture live instances.
+     *  2. AA 17.7+: the launcher path. Find `k(Intent, Options)` by its log string, the static
+     *     no-arg singleton getter in the same class, and the options' no-arg constructor.
      * Both failures are logged, never thrown (would abort the whole hook chain).
      */
     private fun resolveCarActivityStarter(bridge: DexKitBridge, lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -250,18 +252,27 @@ object AaUiHook: AaHook() {
                     usingStrings {
                         add(STRING_START_CAR_ACTIVITY, StringMatchType.Equals, false)
                     }
-                    paramTypes("android.content.Intent")
+                    paramCount = 2
                     returnType = "void"
                 }
-            }
+            }.map { it.getMethodInstance(lpparam.classLoader) }
+                .filter { it.parameterTypes[0] == Intent::class.java && !Modifier.isStatic(it.modifiers) }
             if (methods.size != 1) {
-                throw NoSuchMethodException("expected exactly one (Intent)V method using \"$STRING_START_CAR_ACTIVITY\", got ${methods.size}: ${methods.joinToString { "${it.className}.${it.methodName}" }}")
+                throw NoSuchMethodException("expected exactly one instance (Intent, Options)V method using \"$STRING_START_CAR_ACTIVITY\", got ${methods.size}: ${methods.joinToString { "${it.declaringClass.name}.${it.name}" }}")
             }
-            val m = methods[0].getMethodInstance(lpparam.classLoader).apply { isAccessible = true }
-            startMethodInstance = m
-            log(tagName, "AaUiHook: car activity starter = ${m.declaringClass.name}.${m.name}(Intent) (AA 17.7+, instance captured via ctor hook)")
+            val start = methods[0].apply { isAccessible = true }
+            val owner = start.declaringClass
+            val singleton = owner.declaredMethods.singleOrNull {
+                Modifier.isStatic(it.modifiers) && it.parameterCount == 0 && it.returnType == owner
+            }?.apply { isAccessible = true }
+                ?: throw NoSuchMethodException("no static ()${owner.name} singleton getter in ${owner.name}")
+            val optionsCtor = start.parameterTypes[1].getDeclaredConstructor().apply { isAccessible = true }
+            startMethod177 = start
+            starterSingleton177 = singleton
+            startOptionsCtor177 = optionsCtor
+            log(tagName, "AaUiHook: car activity starter = ${owner.name}.${singleton.name}().${start.name}(Intent, ${start.parameterTypes[1].name}) (AA 17.7+, launcher path)")
         }.onFailure { e ->
-            log(tagName, "AaUiHook: startCarActivity(Intent) not resolved, Auto Open cannot start AADisplay on this AA version", e)
+            log(tagName, "AaUiHook: launcher startCarActivity not resolved, Auto Open cannot start AADisplay on this AA version", e)
         }
     }
 
@@ -271,65 +282,36 @@ object AaUiHook: AaHook() {
             m.invoke(null, intent)
             return true
         }
-        val m = startMethodInstance ?: run {
+        val start = startMethod177
+        val singleton = starterSingleton177
+        val optionsCtor = startOptionsCtor177
+        if (start == null || singleton == null || optionsCtor == null) {
             log(tagName, "AaUiHook: no car activity starter resolved, skip")
             return false
         }
-        // One stub per CarRegion, created in region order (primary first) once per session;
-        // the list is reset on the service's onCreate/onDestroy, so the first live one is primary.
-        val target = synchronized(carActivityStarters) {
-            carActivityStarters.removeAll { it.get() == null }
-            carActivityStarters.firstOrNull()?.get()
-        }
-        if (target == null) {
-            log(tagName, "AaUiHook: ${m.declaringClass.name} instance not captured yet, skip")
+        val starter = singleton.invoke(null) ?: run {
+            log(tagName, "AaUiHook: ${singleton.declaringClass.name}.${singleton.name}() returned null (not registered yet), skip")
             return false
         }
-        m.invoke(target, intent)
+        start.invoke(starter, intent, optionsCtor.newInstance())
+        log(tagName, "AaUiHook: auto-open dispatched via ${start.declaringClass.name}.${start.name}")
         return true
     }
 
     private fun hookAutoOpenSession() {
-        // AA 17.7+: capture the per-region starter instances (created once per session).
-        startMethodInstance?.declaringClass?.let { starterClass ->
-            runCatching {
-                findAllConstructors(starterClass) { true }.hookAfter { param ->
-                    synchronized(carActivityStarters) {
-                        carActivityStarters.removeAll { it.get() == null }
-                        carActivityStarters.add(WeakReference(param.thisObject))
-                    }
-                    log(tagName, "AaUiHook: captured ${starterClass.name} instance (${param.thisObject}), total=${carActivityStarters.size}")
-                }
-            }.onFailure { e ->
-                log(tagName, "AaUiHook: cannot hook ${starterClass.name} constructors, Auto Open disabled", e)
-            }
-        }
-
         val clazz = sysUiServiceClass
         if (clazz == null) {
             log(tagName, "AaUiHook: system-UI service unresolved, auto-open once-per-session guard disabled")
             return
         }
         try {
-            val onCreate = findMethod(clazz) { name == "onCreate" && parameterCount == 0 }
-            // Reset BEFORE onCreate runs: AppDecorService.onCreate itself creates the per-region
-            // starter stubs, so clearing afterwards (as the first 17.7 build did) threw away every
-            // instance captured a few ms earlier and Auto Open logged "instance not captured yet".
-            onCreate.hookBefore {
-                synchronized(carActivityStarters) { carActivityStarters.clear() }
-            }
-            onCreate.hookAfter {
+            findMethod(clazz) { name == "onCreate" && parameterCount == 0 }.hookAfter {
                 autoOpenedThisSession = false
-                log(tagName, "AaUiHook: ${clazz.simpleName}.onCreate -> new projection session, auto-open re-armed (starters=${carActivityStarters.size})")
+                log(tagName, "AaUiHook: ${clazz.simpleName}.onCreate -> new projection session, auto-open re-armed")
             }
             autoOpenGuardEnabled = true
         } catch (e: Throwable) {
             log(tagName, "AaUiHook: ${clazz.name}.onCreate not hookable, auto-open once-per-session guard disabled", e)
-        }
-        runCatching {
-            findMethod(clazz) { name == "onDestroy" && parameterCount == 0 }.hookAfter {
-                synchronized(carActivityStarters) { carActivityStarters.clear() }
-            }
         }
     }
 

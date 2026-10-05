@@ -56,6 +56,10 @@ object AndroidHook : BaseHook() {
         }.hookAfter {
             activityManagerServiceSystemReadyHook?.unhook()
             CoreManagerService.systemReady()
+            // Record display interactivity from boot on, so a virtual display created while the
+            // phone sleeps can be made interactive immediately (see VirtualDisplayKeepOn).
+            runCatching { VirtualDisplayKeepOn.installInputRecorder() }
+                .onFailure { log(tagName, "VirtualDisplayKeepOn: input recorder install failed", it) }
             log(tagName, "system ready")
         }
 
@@ -183,6 +187,52 @@ object AndroidHook : BaseHook() {
         @Volatile private var displayId: Int = -1
         private var hooks: List<XC_MethodHook.Unhook> = emptyList()
 
+        // Input side is installed once, at system ready, and stays installed. PowerManager only
+        // publishes display interactivity on a wakefulness / group change, so when AADisplay is
+        // started while the phone is already asleep the "non-interactive" map that includes our
+        // new display was sent before [hook] ran, and nothing re-sent it until the phone woke up
+        // (field report: first start with the screen off -> no touch until one wake cycle).
+        // Recording the last map lets [hook] replay it immediately through the patched method.
+        private val inputLock = Any()
+        private var inputRecorder: List<XC_MethodHook.Unhook>? = null
+        private var lastImsService: Any? = null
+        private var lastInteractivities: SparseBooleanArray? = null
+
+        fun installInputRecorder() {
+            if (inputRecorder != null) return
+            inputRecorder = imsSetDisplayInteractivities?.hookBefore { param ->
+                try {
+                    val map = param.args[0] as? SparseBooleanArray ?: return@hookBefore
+                    synchronized(inputLock) {
+                        lastImsService = param.thisObject
+                        lastInteractivities = map.clone()
+                    }
+                    val target = displayId
+                    if (target < 0) return@hookBefore
+                    // Absent = interactive as far as InputManagerService is concerned; only flip false.
+                    if (map.indexOfKey(target) < 0 || map.get(target)) return@hookBefore
+                    param.args[0] = map.clone().apply { put(target, true) }
+                    log(tagName, "VirtualDisplayKeepOn: display $target reported non-interactive -> kept interactive")
+                } catch (e: Throwable) {
+                    log(tagName, "VirtualDisplayKeepOn setDisplayInteractivities hook error", e)
+                }
+            } ?: emptyList()
+            log(tagName, "VirtualDisplayKeepOn: input interactivity recorder installed (${inputRecorder?.size ?: 0} method)")
+        }
+
+        /** Re-sends the last interactivity map; the recorder hook applies the current override. */
+        private fun replayInteractivities() {
+            val (service, map) = synchronized(inputLock) { lastImsService to lastInteractivities?.clone() }
+            if (service == null || map == null) {
+                log(tagName, "VirtualDisplayKeepOn: no interactivity map recorded yet, nothing to replay")
+                return
+            }
+            val method = imsSetDisplayInteractivities?.firstOrNull() ?: return
+            runCatching { method.invoke(service, map) }
+                .onSuccess { log(tagName, "VirtualDisplayKeepOn: replayed display interactivities ($map)") }
+                .onFailure { log(tagName, "VirtualDisplayKeepOn: replay of display interactivities failed", it) }
+        }
+
         /**
          * @param name the VirtualDisplay name passed to DisplayManager.createVirtualDisplay().
          * @param id   its logical display id.
@@ -207,20 +257,7 @@ object AndroidHook : BaseHook() {
                     log(tagName, "VirtualDisplayKeepOn requestPowerState hook error", e)
                 }
             } ?: emptyList()
-            val inputHooks = imsSetDisplayInteractivities?.hookBefore { param ->
-                try {
-                    val target = displayId
-                    if (target < 0) return@hookBefore
-                    val map = param.args[0] as? SparseBooleanArray ?: return@hookBefore
-                    // Absent = interactive as far as InputManagerService is concerned; only flip false.
-                    if (map.indexOfKey(target) < 0 || map.get(target)) return@hookBefore
-                    val copy = map.clone().apply { put(target, true) }
-                    param.args[0] = copy
-                    log(tagName, "VirtualDisplayKeepOn: display $target reported non-interactive -> kept interactive")
-                } catch (e: Throwable) {
-                    log(tagName, "VirtualDisplayKeepOn setDisplayInteractivities hook error", e)
-                }
-            } ?: emptyList()
+            installInputRecorder() // normally already done at system ready
             val deviceHooks = requestDisplayStateLocked?.hookBefore { param ->
                 try {
                     val target = displayName ?: return@hookBefore
@@ -234,15 +271,19 @@ object AndroidHook : BaseHook() {
                     log(tagName, "VirtualDisplayKeepOn hook error", e)
                 }
             } ?: emptyList()
-            hooks = dpcHooks + inputHooks + deviceHooks
-            log(tagName, "VirtualDisplayKeepOn: hooked ${dpcHooks.size} requestPowerState + ${inputHooks.size} setDisplayInteractivities + ${deviceHooks.size} requestDisplayStateLocked for '$name' (display $id)")
+            hooks = dpcHooks + deviceHooks
+            log(tagName, "VirtualDisplayKeepOn: hooked ${dpcHooks.size} requestPowerState + ${inputRecorder?.size ?: 0} setDisplayInteractivities + ${deviceHooks.size} requestDisplayStateLocked for '$name' (display $id)")
+            // The display may already be marked non-interactive (created while the phone sleeps).
+            replayInteractivities()
         }
 
         fun unHook() {
             hooks.forEach { it.unhook() }
             hooks = emptyList()
+            val wasActive = displayId >= 0
             displayName = null
             displayId = -1
+            if (wasActive) replayInteractivities() // hand the honest state back to input
         }
     }
 
