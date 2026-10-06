@@ -417,6 +417,24 @@ class AaVirtualDisplayAdapter(
     }
 
     /**
+     * Android 17 moved task snapshots out of IActivityTaskManager (its getTaskSnapshot(int, boolean)
+     * is gone, NoSuchMethodError) into android.window.TaskSnapshotManager:
+     * getInstance().getTaskSnapshot(taskId, resolution), RESOLUTION_LOW = 2.
+     * Returns null when that API does not exist, so older releases use the IActivityTaskManager path.
+     */
+    private val taskSnapshotManagerA17: Pair<Any, java.lang.reflect.Method>? by lazy {
+        runCatching {
+            val cls = Class.forName("android.window.TaskSnapshotManager")
+            val instance = cls.getMethod("getInstance").invoke(null) ?: return@runCatching null
+            instance to cls.getMethod("getTaskSnapshot", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        }.getOrNull()
+    }
+    private fun taskSnapshotA17(taskId: Int): TaskSnapshot? {
+        val (instance, method) = taskSnapshotManagerA17 ?: return null
+        return method.invoke(instance, taskId, 2 /* RESOLUTION_LOW */) as? TaskSnapshot
+    }
+
+    /**
      * Get recent task list for the specified display
      * Filter out ignored package names and Home package app
      */
@@ -448,7 +466,7 @@ class AaVirtualDisplayAdapter(
                 val packageName = topActivity.packageName
 
                 var snapshot: Bitmap? = runCatching {
-                    try {
+                    (taskSnapshotA17(taskInfo.taskId) ?: try {
                         if (Build.VERSION.SDK_INT >= 34) {//14+
                             Instances.iActivityTaskManager.getTaskSnapshot(taskInfo.taskId, true, true)
                         } else {
@@ -456,7 +474,7 @@ class AaVirtualDisplayAdapter(
                         }
                     } catch (e: Throwable){
                         Instances.iActivityTaskManager.getTaskSnapshot(taskInfo.taskId, true)
-                    }?.let { taskSnapshot ->
+                    })?.let { taskSnapshot ->
                         taskSnapshot.hardwareBuffer?.let { buffer ->
                             Bitmap.wrapHardwareBuffer(buffer, taskSnapshot.colorSpace)
                         }
