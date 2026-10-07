@@ -104,7 +104,7 @@ class MainActivity: BaseActivity<ActivityMainBinding>(ActivityMainBinding::class
             }
             R.id.github -> {
                 startActivity(Intent(Intent.ACTION_VIEW).apply {
-                    data = "https://github.com/Nitsuya/AADisplay".toUri()
+                    data = "https://github.com/nickcatslin/AADisplay-Beta".toUri()
                 })
                 true
             }

@@ -148,11 +148,11 @@
         <Preference
             app:key="GithubLink"
             app:title="Source code &amp; updates"
-            app:summary="github.com/bikekoala/AADisplay-Beta"
+            app:summary="github.com/nickcatslin/AADisplay-Beta"
             app:iconSpaceReserved="false">
             <intent
                 android:action="android.intent.action.VIEW"
-                android:data="https://github.com/bikekoala/AADisplay-Beta"/>
+                android:data="https://github.com/nickcatslin/AADisplay-Beta"/>
         </Preference>
 
     </PreferenceCategory>
