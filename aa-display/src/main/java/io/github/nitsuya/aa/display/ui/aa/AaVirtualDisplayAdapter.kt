@@ -433,9 +433,26 @@ class AaVirtualDisplayAdapter(
      * On Android 17 TaskSnapshot.getHardwareBuffer() always returns null (verified on the phone with
      * a root probe); the image is only reachable through the new TaskSnapshot.wrapToBitmap().
      */
-    private fun taskBitmapA17(taskId: Int): Bitmap? {
+    private fun taskBitmapA17(taskId: Int, captureIfMissing: Boolean): Bitmap? {
         val (instance, method) = taskSnapshotManagerA17 ?: return null
-        val snapshot = method.invoke(instance, taskId, 2 /* RESOLUTION_LOW */) ?: return null
+        method.invoke(instance, taskId, 2 /* RESOLUTION_LOW */)?.let { return snapshotToBitmapA17(it) }
+        if (!captureIfMissing) return null
+        // Android only caches a snapshot when a task goes to the background, so the task currently
+        // shown on the car screen never has one. Capture it on demand: updateCache = false returns a
+        // one-off snapshot without writing the system cache, the disk, or notifying listeners.
+        // Only for tasks on our virtual display: their content is already visible on that screen.
+        val take = runCatching {
+            instance.javaClass.getMethod("takeTaskSnapshot", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+        }.getOrNull() ?: return null
+        val taken = take.invoke(instance, taskId, false) ?: return null
+        return snapshotToBitmapA17(taken)
+    }
+
+    /**
+     * On Android 17 TaskSnapshot.getHardwareBuffer() always returns null (verified on the phone with
+     * a root probe); the image is only reachable through the new TaskSnapshot.wrapToBitmap().
+     */
+    private fun snapshotToBitmapA17(snapshot: Any): Bitmap? {
         runCatching { snapshot.javaClass.getMethod("wrapToBitmap").invoke(snapshot) as? Bitmap }
             .getOrNull()?.let { return it }
         val ts = snapshot as? TaskSnapshot ?: return null
@@ -476,7 +493,10 @@ class AaVirtualDisplayAdapter(
                 var snapshot: Bitmap? = runCatching {
                     // Android 17: the snapshot API moved and the buffer is only exposed via
                     // wrapToBitmap(); no fallback to the removed IActivityTaskManager method.
-                    if (taskSnapshotManagerA17 != null) return@runCatching taskBitmapA17(taskInfo.taskId)
+                    if (taskSnapshotManagerA17 != null) return@runCatching taskBitmapA17(
+                        taskInfo.taskId,
+                        captureIfMissing = displayId != Display.DEFAULT_DISPLAY && displayId == mDisplayId,
+                    )
                     (try {
                         if (Build.VERSION.SDK_INT >= 34) {//14+
                             Instances.iActivityTaskManager.getTaskSnapshot(taskInfo.taskId, true, true)
