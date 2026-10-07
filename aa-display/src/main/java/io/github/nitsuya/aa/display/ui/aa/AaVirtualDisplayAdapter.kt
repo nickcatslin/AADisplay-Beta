@@ -429,9 +429,17 @@ class AaVirtualDisplayAdapter(
             instance to cls.getMethod("getTaskSnapshot", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
         }.getOrNull()
     }
-    private fun taskSnapshotA17(taskId: Int): TaskSnapshot? {
+    /**
+     * On Android 17 TaskSnapshot.getHardwareBuffer() always returns null (verified on the phone with
+     * a root probe); the image is only reachable through the new TaskSnapshot.wrapToBitmap().
+     */
+    private fun taskBitmapA17(taskId: Int): Bitmap? {
         val (instance, method) = taskSnapshotManagerA17 ?: return null
-        return method.invoke(instance, taskId, 2 /* RESOLUTION_LOW */) as? TaskSnapshot
+        val snapshot = method.invoke(instance, taskId, 2 /* RESOLUTION_LOW */) ?: return null
+        runCatching { snapshot.javaClass.getMethod("wrapToBitmap").invoke(snapshot) as? Bitmap }
+            .getOrNull()?.let { return it }
+        val ts = snapshot as? TaskSnapshot ?: return null
+        return ts.hardwareBuffer?.let { Bitmap.wrapHardwareBuffer(it, ts.colorSpace) }
     }
 
     /**
@@ -466,7 +474,10 @@ class AaVirtualDisplayAdapter(
                 val packageName = topActivity.packageName
 
                 var snapshot: Bitmap? = runCatching {
-                    (taskSnapshotA17(taskInfo.taskId) ?: try {
+                    // Android 17: the snapshot API moved and the buffer is only exposed via
+                    // wrapToBitmap(); no fallback to the removed IActivityTaskManager method.
+                    if (taskSnapshotManagerA17 != null) return@runCatching taskBitmapA17(taskInfo.taskId)
+                    (try {
                         if (Build.VERSION.SDK_INT >= 34) {//14+
                             Instances.iActivityTaskManager.getTaskSnapshot(taskInfo.taskId, true, true)
                         } else {
