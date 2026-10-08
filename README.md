@@ -1,5 +1,6 @@
 # AADisplay-Beta (nickcatslin fork)
 
+[![Release](https://img.shields.io/github/v/release/nickcatslin/AADisplay-Beta)](https://github.com/nickcatslin/AADisplay-Beta/releases/latest)
 [![Build APK](https://github.com/nickcatslin/AADisplay-Beta/actions/workflows/build.yml/badge.svg)](https://github.com/nickcatslin/AADisplay-Beta/actions/workflows/build.yml)
 ![Xposed Module](https://img.shields.io/badge/Xposed-Module-blue)
 ![Android SDK](https://img.shields.io/badge/Android%20SDK-min%2031%20%C2%B7%20target%2036-brightgreen?logo=android)
@@ -52,7 +53,7 @@ GitHub Actions builds a debug APK on every push. It also builds a release APK wh
 
 ## Install and set up
 
-1. Install the APK. Download it from the artifacts of the latest successful [Build APK run](https://github.com/nickcatslin/AADisplay-Beta/actions/workflows/build.yml).
+1. Install the APK from the latest [release](https://github.com/nickcatslin/AADisplay-Beta/releases/latest). Development builds are also available as artifacts of the [Build APK workflow](https://github.com/nickcatslin/AADisplay-Beta/actions/workflows/build.yml).
 2. In **LSPosed**, enable the module and scope it to **System Framework** and **Android Auto**.
 3. Reboot the phone. The system-side hooks only load at boot.
 4. Open AADisplay once so it creates its settings file, then adjust the settings as needed.
